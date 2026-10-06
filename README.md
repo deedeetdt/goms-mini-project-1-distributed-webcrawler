@@ -4,23 +4,91 @@ A distributed web crawler project in Rust.
 
 ## Current progress
 
-The project defines the crawl statistics, handles URLs, extracts links and
-word counts from HTML, and fetches individual URLs asynchronously. The `crawl`
-binary currently prints empty statistics; Redis coordination and the node/CLI
-integration are still being implemented.
+The CLI can submit jobs to Redis and show their status. It reuses the existing
+job ID when the same normalized URL is submitted again. URL handling, HTML
+analysis, and individual HTTP fetching are also implemented.
+
+Workers and the crawling loop are not implemented yet: submitted jobs remain
+waiting. `node`, `status -f`, and `stats` will be added in later steps.
 
 ## Run and test
 
 From the repository root:
 
 ```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl
-cargo test --manifest-path distributed_crawler/Cargo.toml
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- --help
 ```
 
-The HTTP tests start temporary servers on localhost using available ports and
-stop them when each test finishes. They require local networking permission;
-they do not require Docker or Redis.
+Start Redis in Docker if you do not already have a container named `redis`:
+
+```sh
+docker run -d --name redis -p 6379:6379 redis:7
+```
+
+If that container already exists but is stopped, use `docker start redis`.
+Then submit a URL and inspect the job ID printed by the command:
+
+```sh
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://cs.muic.mahidol.ac.th/courses/ooc/api/
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+```
+
+Replace `1` with the returned job ID. Expect zero crawled files, one URL in the
+frontier, zero in flight, and `done: false`. Submitting the URL again returns the
+same ID and leaves only one waiting URL. Each URL in a multi-URL submission
+gets its own job; all inputs are validated before any of that batch's jobs are
+created. A Redis error during submission can still interrupt the batch.
+
+Use `--redis-url` to connect to another address:
+
+```sh
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- --redis-url redis://127.0.0.1:6379/ status 1
+```
+
+For the full test suite, keep Redis running:
+
+```sh
+cargo test --manifest-path distributed_crawler/Cargo.toml
+cargo fmt --manifest-path distributed_crawler/Cargo.toml --check
+cargo clippy --manifest-path distributed_crawler/Cargo.toml --all-targets -- -D warnings
+```
+
+Redis tests default to `redis://127.0.0.1:6379/15`; set
+`CRAWLER_TEST_REDIS_URL` to use another test instance or database. Storage tests
+use unique key prefixes. CLI tests submit unique test URLs and remove their
+own job data afterward; the shared ID counter may advance. Tests never clear
+the entire database. A failed test may leave its own test data behind.
+
+HTTP tests start temporary servers on localhost using available ports and stop
+them when each test finishes. The tests require local networking permission.
+
+## Redis submission and progress
+
+`src/store.rs` connects to Redis asynchronously. Production keys use the
+`crawler:` prefix:
+
+| Key | Redis type | Purpose |
+|---|---|---|
+| `crawler:next_job_id` | Integer string | Allocate candidate numeric job IDs |
+| `crawler:submissions` | Hash | Map normalized base URLs to existing IDs |
+| `crawler:active` | Set | Jobs available for workers to consider |
+| `crawler:job:<id>:meta` | Hash | Base URL, state, and crawl counters |
+| `crawler:job:<id>:seen` | Set | URLs already scheduled for this job |
+| `crawler:job:<id>:frontier` | List | URLs waiting to be fetched |
+
+Submission reserves a candidate ID, then runs `src/lua/submit.lua`. The script
+returns the existing ID for a duplicate URL, including a completed job. For a
+new URL, it initializes metadata, records the seed in `seen`, appends it to the
+frontier, adds the job to `active`, and records the submission mapping. Redis
+runs these script commands without another client's commands interleaving,
+so simultaneous submissions cannot create two jobs for the same base.
+Candidate IDs reserved for duplicate submissions are unused; gaps are harmless.
+
+`src/lua/status.lua` reads metadata and queue sizes in one consistent snapshot.
+It also checks the future per-job `inflight` set. That set does not exist until
+work is claimed, so its size is currently zero. Unknown jobs return an error
+through the CLI. Claiming, finishing, and automatic completion detection are
+still to be implemented; an empty queue alone will not determine completion.
 
 ## URL and extension rules
 

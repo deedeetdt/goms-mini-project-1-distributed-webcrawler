@@ -1,11 +1,51 @@
-use distributed_crawler::model::WebStats;
+use std::error::Error;
 
-fn main() {
-    let stats = WebStats::default();
+use clap::Parser;
+use distributed_crawler::cli::{Cli, Command};
+use distributed_crawler::store::Store;
+use distributed_crawler::url_rules::normalize_url;
 
-    println!(
-        "files: {}   extensions: {}   words: {}",
-        stats.num_files, stats.num_exts, stats.total_word_count
-    );
-    println!("extension counts: {:?}", stats.ext_counts);
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run(Cli::parse()).await {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+    match cli.command {
+        Command::Submit { urls } => {
+            // Validate every input before creating any jobs in this batch.
+            let bases = urls
+                .iter()
+                .map(|url| normalize_url(url))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut store = Store::connect(&cli.redis_url, "crawler")
+                .await
+                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            for base in bases {
+                let job = store.submit(&base).await?;
+                println!("{job} {base}");
+            }
+        }
+        Command::Status { job } => {
+            let mut store = Store::connect(&cli.redis_url, "crawler")
+                .await
+                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            let status = store
+                .status(job)
+                .await?
+                .ok_or_else(|| format!("Job {job} does not exist"))?;
+            println!("job: {job}");
+            println!("base: {}", status.base_url);
+            println!("crawled: {}", status.num_files);
+            println!("frontier: {}", status.frontier);
+            println!("in-flight: {}", status.in_flight);
+            println!("processed: {}", status.processed);
+            println!("unsuccessful: {}", status.unsuccessful);
+            println!("done: {}", status.done);
+        }
+    }
+    Ok(())
 }
