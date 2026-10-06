@@ -8,6 +8,9 @@ The CLI can submit jobs to Redis and show their status. It reuses the existing
 job ID when the same normalized URL is submitted again. URL handling, HTML
 analysis, and individual HTTP fetching are also implemented.
 
+The storage layer can atomically claim a waiting URL and record it in flight.
+This operation is tested but is not yet called by a running worker.
+
 Workers and the crawling loop are not implemented yet: submitted jobs remain
 waiting. `node`, `status -f`, and `stats` will be added in later steps.
 
@@ -75,6 +78,7 @@ them when each test finishes. The tests require local networking permission.
 | `crawler:job:<id>:meta` | Hash | Base URL, state, and crawl counters |
 | `crawler:job:<id>:seen` | Set | URLs already scheduled for this job |
 | `crawler:job:<id>:frontier` | List | URLs waiting to be fetched |
+| `crawler:job:<id>:inflight` | Set | Claimed URLs whose work is not finished |
 
 Submission reserves a candidate ID, then runs `src/lua/submit.lua`. The script
 returns the existing ID for a duplicate URL, including a completed job. For a
@@ -84,11 +88,20 @@ runs these script commands without another client's commands interleaving,
 so simultaneous submissions cannot create two jobs for the same base.
 Candidate IDs reserved for duplicate submissions are unused; gaps are harmless.
 
+`src/lua/claim.lua` takes one URL from the front of the frontier with `LPOP`,
+records it in the in-flight set with `SADD`, and changes the job state to
+`running`. These updates execute together so two callers cannot claim the same
+queue entry, and a status reader cannot see a URL removed from the queue before
+it is recorded in flight. Submission appends through `RPUSH`; the finish
+operation will use that same append rule for discoveries, providing shared FIFO
+scheduling. Unknown jobs, completed jobs, and empty queues return no work.
+An empty queue never marks a job done.
+
 `src/lua/status.lua` reads metadata and queue sizes in one consistent snapshot.
-It also checks the future per-job `inflight` set. That set does not exist until
-work is claimed, so its size is currently zero. Unknown jobs return an error
-through the CLI. Claiming, finishing, and automatic completion detection are
-still to be implemented; an empty queue alone will not determine completion.
+Unknown jobs return an error through the CLI. Finishing and automatic completion
+detection are still to be implemented. Each claimed URL will stay in flight
+until its results and discoveries are published; completion will require both
+an empty frontier and an empty in-flight set.
 
 ## URL and extension rules
 

@@ -49,6 +49,17 @@ impl Store {
             .await
     }
 
+    /// Move the first waiting URL into flight, without a gap between the steps.
+    /// None means no work: an empty queue, unknown job, or completed job.
+    pub async fn claim(&mut self, job: u64) -> redis::RedisResult<Option<String>> {
+        redis::Script::new(include_str!("lua/claim.lua"))
+            .key(self.job_key(job, "meta"))
+            .key(self.job_key(job, "frontier"))
+            .key(self.job_key(job, "inflight"))
+            .invoke_async(&mut self.connection)
+            .await
+    }
+
     pub async fn status(&mut self, job: u64) -> redis::RedisResult<Option<JobStatus>> {
         // Read related fields together, even once workers start changing them.
         type Snapshot = (String, String, usize, usize, usize, usize, usize);
