@@ -1,6 +1,4 @@
-mod model;
-
-use model::WebStats;
+use distributed_crawler::model::WebStats;
 
 fn main() {
     let stats = WebStats::default();

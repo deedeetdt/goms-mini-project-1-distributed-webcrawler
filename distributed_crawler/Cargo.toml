@@ -3,4 +3,9 @@ name = "distributed_crawler"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "crawl"
+path = "src/main.rs"
+
 [dependencies]
+url = "2.5.8"
