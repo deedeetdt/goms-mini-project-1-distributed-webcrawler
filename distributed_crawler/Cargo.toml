@@ -8,4 +8,5 @@ name = "crawl"
 path = "src/main.rs"
 
 [dependencies]
+scraper = "0.27.0"
 url = "2.5.8"
