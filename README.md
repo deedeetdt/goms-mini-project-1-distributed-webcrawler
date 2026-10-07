@@ -16,7 +16,7 @@ Submitted jobs are crawled automatically while a node is running.
 Each node defaults to 10 workers and accepts `--workers` from 1 to 10. The
 request limit applies to the whole node across all jobs. `stats` prints final
 results for completed jobs. `status -f` follows progress until completion.
-The full multi-node acceptance checks will be added in a later step.
+Tests also verify separate node processes sharing the same Redis instance.
 
 ## Run and test
 
@@ -40,6 +40,11 @@ cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
 ```
 
 For a slower run that is easier to follow, use `node --workers 1`.
+To run multiple nodes, repeat the same `node` command in another terminal for
+each node. Point all nodes and CLI commands at the same Redis URL and database.
+Each node has its own pool of at most 10 workers; two nodes can therefore have
+up to 20 requests in flight. Nodes coordinate through Redis, with no direct
+connections between them. Keep a separate terminal for the CLI commands below.
 
 In another terminal, submit a URL and inspect the job ID printed by the command.
 This practice-site example limits the crawl to its love-tag section:
@@ -100,10 +105,20 @@ The CLI requires a subcommand. Passing a bare URL after `--` does not submit or
 crawl it. The manifest path is required from the repository root because the
 Cargo project is in `distributed_crawler/`.
 
-For the full test suite, keep Redis running:
+For the full test suite, use a dedicated Redis instance with no other crawler
+nodes connected. This Docker example uses port 6380 so it can run alongside the
+normal Redis container on port 6379. It disables persistence and is removed when
+stopped:
 
 ```sh
-cargo test --manifest-path distributed_crawler/Cargo.toml
+docker run -d --rm --name crawler-test-redis -p 127.0.0.1:6380:6379 redis:7 redis-server --save "" --appendonly no
+CRAWLER_TEST_REDIS_URL=redis://127.0.0.1:6380/ cargo test --manifest-path distributed_crawler/Cargo.toml
+docker stop crawler-test-redis
+```
+
+Formatting and lint checks do not need Redis:
+
+```sh
 cargo fmt --manifest-path distributed_crawler/Cargo.toml --check
 cargo clippy --manifest-path distributed_crawler/Cargo.toml --all-targets -- -D warnings
 ```
@@ -113,6 +128,19 @@ Redis tests default to `redis://127.0.0.1:6379/15`; set
 use unique key prefixes. CLI tests submit unique test URLs and remove their
 own job data afterward; the shared ID counter may advance. Tests never clear
 the entire database. A failed test may leave its own test data behind.
+
+`tests/distributed.rs` launches real host `crawl node` processes against one
+controlled HTTP site, comparing one node with 1 or 10 workers, two nodes, and
+three nodes. Its expected result is 7 files (`html: 5`, `jpg: 1`, `pdf: 1`) and
+10 words. Held responses force requests to overlap across processes and verify
+that an empty frontier with a page in flight stays unfinished. Several parents
+discover the same child; request logs verify one fetch per URL per job and no
+out-of-scope requests. Another scenario runs two overlapping jobs and checks
+independent totals. These runs also check follow-mode exit, immediate final
+stats, completed-submission reuse, and retained stats after nodes stop.
+The test refuses to start nodes if it sees existing active jobs. It stops and
+reaps its child processes and removes only its own job data between runs; use
+the dedicated test instance to keep unrelated jobs and nodes isolated.
 
 HTTP tests start temporary servers on localhost using available ports and stop
 them when each test finishes. The tests require local networking permission.
