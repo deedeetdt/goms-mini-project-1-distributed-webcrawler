@@ -2,6 +2,7 @@ use std::error::Error;
 
 use clap::Parser;
 use distributed_crawler::cli::{Cli, Command};
+use distributed_crawler::node;
 use distributed_crawler::store::Store;
 use distributed_crawler::url_rules::normalize_url;
 
@@ -13,8 +14,15 @@ async fn main() {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
     match cli.command {
+        Command::Node { workers } => {
+            let store = Store::connect(&cli.redis_url, "crawler")
+                .await
+                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            println!("Node started with {workers} workers; waiting for jobs.");
+            node::run(store, workers).await?;
+        }
         Command::Submit { urls } => {
             // Validate every input before creating any jobs in this batch.
             let bases = urls

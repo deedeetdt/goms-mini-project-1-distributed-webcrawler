@@ -8,11 +8,14 @@ The CLI can submit jobs to Redis and show their status. It reuses the existing
 job ID when the same normalized URL is submitted again. URL handling, HTML
 analysis, and individual HTTP fetching are also implemented.
 
-The storage layer can atomically claim a waiting URL and record it in flight.
-This operation is tested but is not yet called by a running worker.
+The `node` command runs a fixed pool of workers that repeatedly claim a waiting
+URL, fetch it, and atomically save its results and new discoveries in Redis.
+Workers rotate between active jobs and keep waiting for new submissions when idle.
+Submitted jobs are crawled automatically while a node is running.
 
-Workers and the crawling loop are not implemented yet: submitted jobs remain
-waiting. `node`, `status -f`, and `stats` will be added in later steps.
+Each node defaults to 10 workers and accepts `--workers` from 1 to 10. The
+request limit applies to the whole node across all jobs. `status -f`, `stats`,
+and the full multi-node acceptance checks will be added in later steps.
 
 ## Run and test
 
@@ -29,24 +32,60 @@ docker run -d --name redis -p 6379:6379 redis:7
 ```
 
 If that container already exists but is stopped, use `docker start redis`.
-Then submit a URL and inspect the job ID printed by the command:
+Start a node in one terminal and leave it running:
 
 ```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://cs.muic.mahidol.ac.th/courses/ooc/api/
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
+```
+
+For a slower run that is easier to follow, use `node --workers 1`.
+
+In another terminal, submit a URL and inspect the job ID printed by the command.
+This practice-site example limits the crawl to its love-tag section:
+
+```sh
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/tag/love/
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
 ```
 
-Replace `1` with the returned job ID. Expect zero crawled files, one URL in the
-frontier, zero in flight, and `done: false`. Submitting the URL again returns the
-same ID and leaves only one waiting URL. Each URL in a multi-URL submission
+Replace `1` with the returned job ID. Run `status` again to see progress.
+When the job is complete, the frontier and in-flight counts are zero and
+`done` is true. Failed requests appear in `unsuccessful`; a completed job may
+contain failed requests. Without a running node, a new job stays waiting with
+one frontier URL and zero crawled files. Submitting the URL again returns the
+same ID, including after completion, without starting a new crawl.
+Each URL in a multi-URL submission
 gets its own job; all inputs are validated before any of that batch's jobs are
 created. A Redis error during submission can still interrupt the batch.
 
-Use `--redis-url` to connect to another address:
+The assignment's example can be submitted in the same way:
+
+```sh
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://cs.muic.mahidol.ac.th/courses/ooc/api/
+```
+
+Stop a node with Ctrl-C after its jobs have finished. This version follows the
+assignment's no-crash assumption: stopping a node during a fetch can leave work
+in flight, and recovery is not implemented.
+
+Use `--redis-url` on both the node and CLI commands to connect to another address:
 
 ```sh
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- --redis-url redis://127.0.0.1:6379/ status 1
 ```
+
+For an optimized build, add `--release` before `--`. Run the node in one terminal
+and submit in another, both pointing at the same Redis instance:
+
+```sh
+cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
+cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/
+cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+```
+
+The CLI requires a subcommand. Passing a bare URL after `--` does not submit or
+crawl it. The manifest path is required from the repository root because the
+Cargo project is in `distributed_crawler/`.
 
 For the full test suite, keep Redis running:
 
@@ -79,6 +118,7 @@ them when each test finishes. The tests require local networking permission.
 | `crawler:job:<id>:seen` | Set | URLs already scheduled for this job |
 | `crawler:job:<id>:frontier` | List | URLs waiting to be fetched |
 | `crawler:job:<id>:inflight` | Set | Claimed URLs whose work is not finished |
+| `crawler:job:<id>:extensions` | Hash | Extension counts for successful files |
 
 Submission reserves a candidate ID, then runs `src/lua/submit.lua`. The script
 returns the existing ID for a duplicate URL, including a completed job. For a
@@ -92,16 +132,59 @@ Candidate IDs reserved for duplicate submissions are unused; gaps are harmless.
 records it in the in-flight set with `SADD`, and changes the job state to
 `running`. These updates execute together so two callers cannot claim the same
 queue entry, and a status reader cannot see a URL removed from the queue before
-it is recorded in flight. Submission appends through `RPUSH`; the finish
-operation will use that same append rule for discoveries, providing shared FIFO
-scheduling. Unknown jobs, completed jobs, and empty queues return no work.
+it is recorded in flight. Submission and finish append through `RPUSH`, providing
+shared FIFO scheduling. Unknown jobs, completed jobs, and empty queues return no work.
 An empty queue never marks a job done.
 
 `src/lua/status.lua` reads metadata and queue sizes in one consistent snapshot.
-Unknown jobs return an error through the CLI. Finishing and automatic completion
-detection are still to be implemented. Each claimed URL will stay in flight
-until its results and discoveries are published; completion will require both
-an empty frontier and an empty in-flight set.
+Unknown jobs return an error through the CLI.
+
+`src/lua/finish.lua` first checks that the parent URL is still in flight. If it
+is not, the result is ignored, preventing duplicate finishes from counting or
+publishing links twice. Each discovered URL is inserted into `seen`; only a new
+insertion is appended to the frontier. This deduplicates discoveries across
+all callers for a job, including cycles and simultaneous discoveries.
+
+Finish adds a successful file's extension and word contribution, increments
+the processed count, and removes the parent from flight. HTTP/request/body
+failures increment the unsuccessful count and contribute no file or words.
+Redirects may publish a destination and count as processed, but contribute no
+file, words, or unsuccessful count. All of these changes happen in one script.
+
+After publishing discoveries and results, finish marks the job done only if
+both the frontier and in-flight set are empty. It removes the job from `active`
+but keeps its metadata, submission mapping, seen URLs, and statistics with no
+expiration. Final counts are stored before the job becomes done; `num_exts`
+is the number of extension hash fields. A `stats` command will expose these
+results in a later step.
+
+Coordination assumes the assignment's no-crash model: Redis and nodes stay
+running, and there is no recovery for a worker that disappears while holding
+work. Lua atomic execution prevents interleaving; it does not roll back earlier
+writes if a script errors. Redis keys and script arguments are owned and
+prepared by this application; repairing corrupted Redis state is not included.
+
+## Node loop
+
+`src/node.rs` starts a fixed number of long-lived Tokio tasks, defaulting to 10.
+Each worker owns a cloned handle to the same multiplexed Redis connection and
+HTTP client pool. Cloning these handles does not create separate queues.
+Because a worker awaits each fetch and finish before claiming another URL,
+the node has at most its worker count of HTTP requests in flight, across all
+jobs. Counts outside 1 to 10 are rejected by the CLI and node API.
+
+On each pass, a worker reads the active job IDs from Redis, sorts them, and
+handles at most one queued URL per job. For each URL it calls claim, awaits the
+HTTP fetch, then calls finish with either the outcome or a request/body failure.
+It refreshes active jobs on every pass. When it cannot claim any work, it
+sleeps for 250 milliseconds before checking again. An empty queue can mean
+another node is still processing a page; only the atomic finish operation marks
+a job done. FIFO order within each job gives BFS-style scheduling, without a
+barrier between depths; concurrent requests may finish in a different order.
+
+The node supervises workers with a Tokio `JoinSet`. A worker error, panic, or
+unexpected exit stops the node, reports the error, and cancels the other tasks.
+There is no retry or crash recovery for work held at that point.
 
 ## URL and extension rules
 
@@ -145,7 +228,7 @@ Extension classification is separate from HTML detection. Response
   URL if none is valid. This affects relative-link resolution, never the job's
   original scope.
 - Filter every discovery using the URL rules above and remove repeated URLs
-  within a page. Cluster-wide deduplication will be handled by Redis.
+  within a page. Redis deduplicates discoveries across workers within each job.
 
 ## HTTP fetching rules
 
@@ -166,5 +249,5 @@ Extension classification is separate from HTML detection. Response
   work. Redirect aliases contribute no files or words; successful destinations
   contribute when fetched separately.
 - Other non-2xx statuses, including 404 and 500, contribute no files or words.
-  Request and HTML-body read errors are returned to the caller without retries;
-  node integration will report and finish those failed attempts through Redis.
+  Request and HTML-body read errors are returned to the caller without retries.
+  The node logs these failures and calls finish to release and record them.

@@ -1,3 +1,5 @@
+// This fixture also includes helpers used only by concurrency tests.
+#[allow(dead_code)]
 mod support;
 
 use std::time::Duration;

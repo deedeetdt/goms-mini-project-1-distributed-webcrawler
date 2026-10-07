@@ -1,6 +1,8 @@
 use redis::aio::MultiplexedConnection;
 use url::Url;
 
+use crate::fetch::FetchOutcome;
+
 #[derive(Clone)]
 pub struct Store {
     connection: MultiplexedConnection,
@@ -49,6 +51,17 @@ impl Store {
             .await
     }
 
+    /// Refresh the active jobs each pass so workers can notice new submissions.
+    pub async fn active_jobs(&mut self) -> redis::RedisResult<Vec<u64>> {
+        let mut jobs: Vec<u64> = redis::cmd("SMEMBERS")
+            .arg(self.key("active"))
+            .query_async(&mut self.connection)
+            .await?;
+        // Redis sets have no order; make rotation predictable by job ID.
+        jobs.sort_unstable();
+        Ok(jobs)
+    }
+
     /// Move the first waiting URL into flight, without a gap between the steps.
     /// None means no work: an empty queue, unknown job, or completed job.
     pub async fn claim(&mut self, job: u64) -> redis::RedisResult<Option<String>> {
@@ -58,6 +71,55 @@ impl Store {
             .key(self.job_key(job, "inflight"))
             .invoke_async(&mut self.connection)
             .await
+    }
+
+    /// Publish a claimed URL's fetch result and check whether the job is done.
+    /// None represents a request/body error; the worker should log it first.
+    /// Results come from Fetcher, with normalized discoveries already in scope.
+    /// Returns true if applied, false if the URL was not in flight (no changes).
+    pub async fn finish(
+        &mut self,
+        job: u64,
+        url: &Url,
+        outcome: Option<&FetchOutcome>,
+    ) -> redis::RedisResult<bool> {
+        let script = redis::Script::new(include_str!("lua/finish.lua"));
+        let mut invocation = script.prepare_invoke();
+        invocation
+            .key(self.job_key(job, "meta"))
+            .key(self.job_key(job, "frontier"))
+            .key(self.job_key(job, "inflight"))
+            .key(self.job_key(job, "seen"))
+            .key(self.job_key(job, "extensions"))
+            .key(self.key("active"))
+            .arg(job)
+            .arg(url.as_str());
+
+        match outcome {
+            Some(FetchOutcome::File {
+                extension,
+                analysis,
+            }) => {
+                invocation
+                    .arg("file")
+                    .arg(extension)
+                    .arg(analysis.word_count);
+                for link in &analysis.links {
+                    invocation.arg(link.as_str());
+                }
+            }
+            Some(FetchOutcome::Redirect { target }) => {
+                invocation.arg("redirect").arg("").arg(0);
+                if let Some(target) = target {
+                    invocation.arg(target.as_str());
+                }
+            }
+            Some(FetchOutcome::Unsuccessful { .. }) | None => {
+                invocation.arg("failed").arg("").arg(0);
+            }
+        }
+
+        invocation.invoke_async(&mut self.connection).await
     }
 
     pub async fn status(&mut self, job: u64) -> redis::RedisResult<Option<JobStatus>> {
