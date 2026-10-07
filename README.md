@@ -15,8 +15,8 @@ Submitted jobs are crawled automatically while a node is running.
 
 Each node defaults to 10 workers and accepts `--workers` from 1 to 10. The
 request limit applies to the whole node across all jobs. `stats` prints final
-results for completed jobs. `status -f` and the full multi-node acceptance
-checks will be added in later steps.
+results for completed jobs. `status -f` follows progress until completion.
+The full multi-node acceptance checks will be added in a later step.
 
 ## Run and test
 
@@ -47,10 +47,16 @@ This practice-site example limits the crawl to its love-tag section:
 ```sh
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/tag/love/
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status -f 1
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
 ```
 
 Replace `1` with the returned job ID. Run `status` again to see progress.
+Use `status -f` (or `status --follow`) to print the initial snapshot and poll
+Redis once per second. Only changed snapshots are printed, separated by a blank
+line. It prints the final `done: true` snapshot and exits automatically, including
+when the job was already complete. Without a running node, following a waiting
+job keeps waiting; Ctrl-C stops the follow command without cancelling the job.
 When the job is complete, the frontier and in-flight counts are zero and
 `done` is true. Failed requests appear in `unsuccessful`; a completed job may
 contain failed requests. Without a running node, a new job stays waiting with
@@ -86,6 +92,7 @@ and submit in another, both pointing at the same Redis instance:
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status -f 1
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
 ```
 

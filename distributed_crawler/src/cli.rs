@@ -30,7 +30,12 @@ pub enum Command {
         urls: Vec<String>,
     },
     /// Show the job's current progress.
-    Status { job: u64 },
+    Status {
+        job: u64,
+        /// Poll once per second, print changes, and exit when the job is done.
+        #[arg(short, long)]
+        follow: bool,
+    },
 
     /// Show final statistics for a completed job.
     Stats { job: u64 },

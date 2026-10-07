@@ -12,7 +12,7 @@ pub struct Store {
     namespace: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct JobStatus {
     pub base_url: String,
     pub num_files: usize,

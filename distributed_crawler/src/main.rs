@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::time::Duration;
 
 use clap::Parser;
 use distributed_crawler::cli::{Cli, Command};
@@ -37,22 +38,35 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
                 println!("{job} {base}");
             }
         }
-        Command::Status { job } => {
+        Command::Status { job, follow } => {
             let mut store = Store::connect(&cli.redis_url, "crawler")
                 .await
                 .map_err(|error| format!("Could not connect to Redis: {error}"))?;
-            let status = store
-                .status(job)
-                .await?
-                .ok_or_else(|| format!("Job {job} does not exist"))?;
-            println!("job: {job}");
-            println!("base: {}", status.base_url);
-            println!("crawled: {}", status.num_files);
-            println!("frontier: {}", status.frontier);
-            println!("in-flight: {}", status.in_flight);
-            println!("processed: {}", status.processed);
-            println!("unsuccessful: {}", status.unsuccessful);
-            println!("done: {}", status.done);
+            let mut previous = None;
+            loop {
+                let status = store
+                    .status(job)
+                    .await?
+                    .ok_or_else(|| format!("Job {job} does not exist"))?;
+                if previous.as_ref() != Some(&status) {
+                    if previous.is_some() {
+                        println!();
+                    }
+                    println!("job: {job}");
+                    println!("base: {}", status.base_url);
+                    println!("crawled: {}", status.num_files);
+                    println!("frontier: {}", status.frontier);
+                    println!("in-flight: {}", status.in_flight);
+                    println!("processed: {}", status.processed);
+                    println!("unsuccessful: {}", status.unsuccessful);
+                    println!("done: {}", status.done);
+                }
+                if !follow || status.done {
+                    break;
+                }
+                previous = Some(status);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         }
         Command::Stats { job } => {
             let mut store = Store::connect(&cli.redis_url, "crawler")
