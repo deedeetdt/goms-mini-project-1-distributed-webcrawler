@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use redis::aio::MultiplexedConnection;
 use url::Url;
 
 use crate::fetch::FetchOutcome;
+use crate::model::WebStats;
 
 #[derive(Clone)]
 pub struct Store {
@@ -18,6 +21,12 @@ pub struct JobStatus {
     pub frontier: usize,
     pub in_flight: usize,
     pub done: bool,
+}
+
+#[derive(Debug)]
+pub enum JobStats {
+    Running,
+    Done(WebStats),
 }
 
 impl Store {
@@ -145,6 +154,31 @@ impl Store {
                 }
             },
         ))
+    }
+
+    /// Read final counts only, together with the completion check in one script.
+    /// None means unknown; Running carries no partial numbers.
+    pub async fn stats(&mut self, job: u64) -> redis::RedisResult<Option<JobStats>> {
+        type Snapshot = (bool, usize, u64, HashMap<String, usize>);
+        let snapshot: Option<Snapshot> = redis::Script::new(include_str!("lua/stats.lua"))
+            .key(self.job_key(job, "meta"))
+            .key(self.job_key(job, "extensions"))
+            .invoke_async(&mut self.connection)
+            .await?;
+        Ok(
+            snapshot.map(|(done, num_files, total_word_count, ext_counts)| {
+                if done {
+                    JobStats::Done(WebStats {
+                        num_files,
+                        num_exts: ext_counts.len(),
+                        ext_counts,
+                        total_word_count,
+                    })
+                } else {
+                    JobStats::Running
+                }
+            }),
+        )
     }
 
     fn key(&self, suffix: &str) -> String {

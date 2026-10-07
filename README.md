@@ -14,8 +14,9 @@ Workers rotate between active jobs and keep waiting for new submissions when idl
 Submitted jobs are crawled automatically while a node is running.
 
 Each node defaults to 10 workers and accepts `--workers` from 1 to 10. The
-request limit applies to the whole node across all jobs. `status -f`, `stats`,
-and the full multi-node acceptance checks will be added in later steps.
+request limit applies to the whole node across all jobs. `stats` prints final
+results for completed jobs. `status -f` and the full multi-node acceptance
+checks will be added in later steps.
 
 ## Run and test
 
@@ -46,6 +47,7 @@ This practice-site example limits the crawl to its love-tag section:
 ```sh
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/tag/love/
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
 ```
 
 Replace `1` with the returned job ID. Run `status` again to see progress.
@@ -54,6 +56,9 @@ When the job is complete, the frontier and in-flight counts are zero and
 contain failed requests. Without a running node, a new job stays waiting with
 one frontier URL and zero crawled files. Submitting the URL again returns the
 same ID, including after completion, without starting a new crawl.
+`stats` shows file totals, the number of distinct extensions, each extension's
+count in alphabetical order, and total words. If the job is not done, it prints
+an unfinished message without partial counts. An unknown job is an error.
 Each URL in a multi-URL submission
 gets its own job; all inputs are validated before any of that batch's jobs are
 created. A Redis error during submission can still interrupt the batch.
@@ -81,6 +86,7 @@ and submit in another, both pointing at the same Redis instance:
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/
 cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
+cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
 ```
 
 The CLI requires a subcommand. Passing a bare URL after `--` does not submit or
@@ -155,8 +161,14 @@ After publishing discoveries and results, finish marks the job done only if
 both the frontier and in-flight set are empty. It removes the job from `active`
 but keeps its metadata, submission mapping, seen URLs, and statistics with no
 expiration. Final counts are stored before the job becomes done; `num_exts`
-is the number of extension hash fields. A `stats` command will expose these
-results in a later step.
+is the number of extension hash fields.
+
+`src/lua/stats.lua` checks completion and reads file, word, and extension counts
+in one atomic snapshot. Unknown jobs return no result; unfinished jobs return
+an unfinished flag without exposing partial statistics. `Store::stats` returns
+the final `WebStats` only for a completed job. The CLI sorts extension names
+before printing. Results remain available when nodes stop, while Redis retains
+the job data; reading stats does not restart the crawl or clear its results.
 
 Coordination assumes the assignment's no-crash model: Redis and nodes stay
 running, and there is no recovery for a worker that disappears while holding

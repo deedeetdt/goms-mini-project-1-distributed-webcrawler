@@ -31,4 +31,7 @@ pub enum Command {
     },
     /// Show the job's current progress.
     Status { job: u64 },
+
+    /// Show final statistics for a completed job.
+    Stats { job: u64 },
 }
