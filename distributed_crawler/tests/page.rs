@@ -169,3 +169,21 @@ fn imperfect_html_still_yields_text_and_links() {
     assert_eq!(result.word_count, 4);
     assert_eq!(result.links.len(), 1);
 }
+
+#[test]
+fn assignment_word_rules_count_occurrences_and_handle_whitespace_and_punctuation() {
+    for (source, expected) in [
+        ("<p>A a a A</p>", 4),
+        ("<p>1one _one -one 'one' \"one\" .one !one</p>", 0),
+        ("<p>Alpha\tBETA\nGamma\r\nDelta&nbsp;Epsilon</p>", 5),
+        ("<title>Title word</title><p>Body word</p>", 4),
+        ("<p>éclair 中文 123 Ant</p>", 1),
+        ("<p>Ant-ant can't snake_case x.y</p>", 4),
+    ] {
+        assert_eq!(
+            analyze(source).word_count,
+            expected,
+            "Wrong word count for {source}"
+        );
+    }
+}

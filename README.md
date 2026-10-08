@@ -241,8 +241,22 @@ Another scenario uses two nodes with two workers each and two overlapping jobs,
 checking independent totals. These runs also check follow-mode exit, immediate
 final stats, completed-submission reuse, and retained stats after nodes stop.
 
-The process test refuses to start nodes if it sees existing active jobs. It
-stops and reaps its child processes and removes only its own job data between
+`tests/assignment.rs` adds higher-contention acceptance scenarios. Thirty-two
+clients simultaneously resubmit waiting, running, and completed jobs; sixty-four
+finishers race to publish the same children and repeat their results. A cyclic
+24-page fixture compares one node with 1 or 10 workers and two or three nodes
+with 10 workers each, including three overlapping jobs. Its main job must yield
+36 files, 6 extensions, and 82 words, with exactly one request per normalized
+URL within each job. The fixture checks fragments, query variants, scope,
+case-insensitive extensions, distinct `jpg`/`jpeg` counts, HTML selected by
+Content-Type, binary files, redirects, and broken links. Another scenario holds
+24 independent jobs to verify 10 simultaneous requests on one real node and
+20 across two nodes. A CLI-only scenario verifies submission and status without
+any node or website fetch. All HTTP responses are controlled locally; these
+expected totals do not depend on a public website staying unchanged.
+
+The process tests refuse to start nodes if they see existing active jobs. They
+stop and reap their child processes and remove only their own job data between
 runs. HTTP fixtures use available localhost ports and stop when each test ends.
 The tests require local networking access.
 
