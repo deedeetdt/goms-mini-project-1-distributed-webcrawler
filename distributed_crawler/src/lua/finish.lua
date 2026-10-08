@@ -1,29 +1,44 @@
 -- KEYS: metadata, frontier, in-flight, seen, extensions, active jobs.
 -- ARGV: job ID, parent URL, outcome kind, extension, words, then discoveries.
-if redis.call('SISMEMBER', KEYS[3], ARGV[2]) == 0 then
+local metadata = KEYS[1]
+local frontier = KEYS[2]
+local in_flight = KEYS[3]
+local seen = KEYS[4]
+local extension_counts = KEYS[5]
+local active_jobs = KEYS[6]
+
+local job_id = ARGV[1]
+local parent_url = ARGV[2]
+local outcome = ARGV[3]
+local extension = ARGV[4]
+local word_count = ARGV[5]
+
+if redis.call('SISMEMBER', in_flight, parent_url) == 0 then
     return 0
 end
 
--- Publish discoveries before removing their parent from flight.
+-- Save discoveries and results before releasing the parent or checking completion.
+-- An empty queue alone is insufficient: an in-flight page may still add URLs.
 for i = 6, #ARGV do
-    if redis.call('SADD', KEYS[4], ARGV[i]) == 1 then
-        redis.call('RPUSH', KEYS[2], ARGV[i])
+    local discovered_url = ARGV[i]
+    if redis.call('SADD', seen, discovered_url) == 1 then
+        redis.call('RPUSH', frontier, discovered_url)
     end
 end
 
-if ARGV[3] == 'file' then
-    redis.call('HINCRBY', KEYS[1], 'num_files', 1)
-    redis.call('HINCRBY', KEYS[1], 'total_word_count', ARGV[5])
-    redis.call('HINCRBY', KEYS[5], ARGV[4], 1)
-elseif ARGV[3] == 'failed' then
-    redis.call('HINCRBY', KEYS[1], 'unsuccessful', 1)
+if outcome == 'file' then
+    redis.call('HINCRBY', metadata, 'num_files', 1)
+    redis.call('HINCRBY', metadata, 'total_word_count', word_count)
+    redis.call('HINCRBY', extension_counts, extension, 1)
+elseif outcome == 'failed' then
+    redis.call('HINCRBY', metadata, 'unsuccessful', 1)
 end
 
-redis.call('HINCRBY', KEYS[1], 'processed', 1)
-redis.call('SREM', KEYS[3], ARGV[2])
+redis.call('HINCRBY', metadata, 'processed', 1)
+redis.call('SREM', in_flight, parent_url)
 
-if redis.call('LLEN', KEYS[2]) == 0 and redis.call('SCARD', KEYS[3]) == 0 then
-    redis.call('HSET', KEYS[1], 'state', 'done')
-    redis.call('SREM', KEYS[6], ARGV[1])
+if redis.call('LLEN', frontier) == 0 and redis.call('SCARD', in_flight) == 0 then
+    redis.call('HSET', metadata, 'state', 'done')
+    redis.call('SREM', active_jobs, job_id)
 end
 return 1

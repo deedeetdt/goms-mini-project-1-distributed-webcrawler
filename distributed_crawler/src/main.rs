@@ -18,9 +18,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
     match cli.command {
         Command::Node { workers } => {
-            let store = Store::connect(&cli.redis_url, "crawler")
-                .await
-                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            let store = connect_store(&cli.redis_url).await?;
             println!("Node started with {workers} workers; waiting for jobs.");
             node::run(store, workers).await?;
         }
@@ -30,18 +28,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
                 .iter()
                 .map(|url| normalize_url(url))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut store = Store::connect(&cli.redis_url, "crawler")
-                .await
-                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            let mut store = connect_store(&cli.redis_url).await?;
             for base in bases {
                 let job = store.submit(&base).await?;
                 println!("{job} {base}");
             }
         }
         Command::Status { job, follow } => {
-            let mut store = Store::connect(&cli.redis_url, "crawler")
-                .await
-                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            let mut store = connect_store(&cli.redis_url).await?;
             let mut previous = None;
             loop {
                 let status = store
@@ -69,9 +63,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
             }
         }
         Command::Stats { job } => {
-            let mut store = Store::connect(&cli.redis_url, "crawler")
-                .await
-                .map_err(|error| format!("Could not connect to Redis: {error}"))?;
+            let mut store = connect_store(&cli.redis_url).await?;
             match store
                 .stats(job)
                 .await?
@@ -94,4 +86,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     Ok(())
+}
+
+async fn connect_store(redis_url: &str) -> Result<Store, String> {
+    Store::connect(redis_url, "crawler")
+        .await
+        .map_err(|error| format!("Could not connect to Redis: {error}"))
 }

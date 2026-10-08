@@ -141,19 +141,21 @@ impl Store {
             .invoke_async(&mut self.connection)
             .await?;
 
-        Ok(snapshot.map(
-            |(base_url, state, num_files, processed, unsuccessful, frontier, in_flight)| {
-                JobStatus {
-                    base_url,
-                    num_files,
-                    processed,
-                    unsuccessful,
-                    frontier,
-                    in_flight,
-                    done: state == "done",
-                }
-            },
-        ))
+        let Some((base_url, state, num_files, processed, unsuccessful, frontier, in_flight)) =
+            snapshot
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(JobStatus {
+            base_url,
+            num_files,
+            processed,
+            unsuccessful,
+            frontier,
+            in_flight,
+            done: state == "done",
+        }))
     }
 
     /// Read final counts only, together with the completion check in one script.

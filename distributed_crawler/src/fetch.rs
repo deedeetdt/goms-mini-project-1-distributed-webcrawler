@@ -1,4 +1,4 @@
-use reqwest::header::{CONTENT_TYPE, LOCATION};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, LOCATION};
 use url::Url;
 
 use crate::page::{PageAnalysis, analyze_html};
@@ -55,16 +55,7 @@ impl Fetcher {
             });
         }
 
-        let is_html = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|content_type| content_type.split(';').next())
-            .is_some_and(|media_type| {
-                let media_type = media_type.trim();
-                media_type.eq_ignore_ascii_case("text/html")
-                    || media_type.eq_ignore_ascii_case("application/xhtml+xml")
-            });
+        let is_html = is_html_content_type(response.headers());
 
         let analysis = if is_html {
             let source = response.text().await?;
@@ -79,4 +70,16 @@ impl Fetcher {
             analysis,
         })
     }
+}
+
+fn is_html_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|content_type| content_type.split(';').next())
+        .is_some_and(|media_type| {
+            let media_type = media_type.trim();
+            media_type.eq_ignore_ascii_case("text/html")
+                || media_type.eq_ignore_ascii_case("application/xhtml+xml")
+        })
 }

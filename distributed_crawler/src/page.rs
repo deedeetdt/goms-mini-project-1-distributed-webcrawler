@@ -68,11 +68,11 @@ fn document_word_count(document: &Html) -> u64 {
         let Node::Text(text) = node.value() else {
             continue;
         };
-        let excluded = node.ancestors().any(|ancestor| match ancestor.value() {
+        let inside_script_or_style = node.ancestors().any(|ancestor| match ancestor.value() {
             Node::Element(element) => matches!(element.name(), "script" | "style"),
             _ => false,
         });
-        if excluded {
+        if inside_script_or_style {
             continue;
         }
 

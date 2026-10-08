@@ -34,7 +34,7 @@ async fn worker_loop(
     fetcher: Fetcher,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let mut worked = false;
+        let mut processed_a_url = false;
         for job in store.active_jobs().await? {
             let Some(status) = store.status(job).await? else {
                 continue;
@@ -63,9 +63,9 @@ async fn worker_loop(
             };
             // Finish failures too, so they cannot leave the job in flight.
             store.finish(job, &url, outcome.as_ref()).await?;
-            worked = true;
+            processed_a_url = true;
         }
-        if !worked {
+        if !processed_a_url {
             // Stay alive for later submissions without busy-looping on Redis.
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
