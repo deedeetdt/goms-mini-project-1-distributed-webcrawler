@@ -1,154 +1,255 @@
 # Mini Project 1: Distributed Webcrawler
 
-A distributed web crawler project in Rust.
+An async Rust crawler driven by one command-line binary, `crawl`. Each submitted
+URL creates an independent job. One or more host processes fetch the job's
+reachable URLs and coordinate through a shared Redis instance running in Docker.
 
-## Current progress
+Each node runs up to 10 Tokio workers. The CLI supports submission, progress
+snapshots, following progress, and final file, extension, and word statistics.
+Nodes keep waiting for new jobs after earlier jobs complete.
 
-The CLI can submit jobs to Redis and show their status. It reuses the existing
-job ID when the same normalized URL is submitted again. URL handling, HTML
-analysis, and individual HTTP fetching are also implemented.
+## Requirements
 
-The `node` command runs a fixed pool of workers that repeatedly claim a waiting
-URL, fetch it, and atomically save its results and new discoveries in Redis.
-Workers rotate between active jobs and keep waiting for new submissions when idle.
-Submitted jobs are crawled automatically while a node is running.
+- Rust and Cargo; Rust 1.91.0 is the tested toolchain.
+- Docker with its engine running, and the Redis 7 image.
+- Network access from every node to Redis and the websites being crawled.
 
-Each node defaults to 10 workers and accepts `--workers` from 1 to 10. The
-request limit applies to the whole node across all jobs. `stats` prints final
-results for completed jobs. `status -f` follows progress until completion.
-Tests also verify separate node processes sharing the same Redis instance.
+The examples below use a macOS/Linux shell. Installed `crawl` commands also work
+on Windows. Windows builds use `crawl.exe`; PowerShell environment-variable
+syntax for tests is shown below. The Cargo project is in `distributed_crawler/`.
 
-## Run and test
+## Build and install
 
-From the repository root:
-
-```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- --help
-```
-
-Start Redis in Docker if you do not already have a container named `redis`:
+From a fresh checkout, enter the repository root, the directory containing this
+README and `distributed_crawler/`. Install the binary using the committed lockfile:
 
 ```sh
-docker run -d --name redis -p 6379:6379 redis:7
+cargo install --path distributed_crawler --bin crawl --locked
+crawl --help
 ```
 
-If that container already exists but is stopped, use `docker start redis`.
-Start a node in one terminal and leave it running:
+This builds an optimized binary and installs it in Cargo's binary directory, so
+`crawl` can run from any directory. If the shell reports `command not found`,
+add the default Cargo binary directory to the current shell's PATH:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+On Windows, ensure `%USERPROFILE%\.cargo\bin` is in PATH. After updating the
+source, repeat the install command with `--force` to update the installed binary.
+
+To build without installing, run from the repository root:
+
+```sh
+cargo build --release --locked --manifest-path distributed_crawler/Cargo.toml --bin crawl
+./distributed_crawler/target/release/crawl --help
+```
+
+For that option, replace `crawl` in the following examples with the binary's
+path. On Windows its path is `distributed_crawler/target/release/crawl.exe`.
+During development, Cargo can also build and run a command directly:
 
 ```sh
 cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
 ```
 
-For a slower run that is easier to follow, use `node --workers 1`.
-To run multiple nodes, repeat the same `node` command in another terminal for
-each node. Point all nodes and CLI commands at the same Redis URL and database.
-Each node has its own pool of at most 10 workers; two nodes can therefore have
-up to 20 requests in flight. Nodes coordinate through Redis, with no direct
-connections between them. Keep a separate terminal for the CLI commands below.
+## Start Redis
 
-In another terminal, submit a URL and inspect the job ID printed by the command.
-This practice-site example limits the crawl to its love-tag section:
+Run this once on the computer hosting Redis, if no container named `redis`
+already exists:
 
 ```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/tag/love/
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status -f 1
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
+docker run -d --name redis -p 6379:6379 redis:7
 ```
 
-Replace `1` with the returned job ID. Run `status` again to see progress.
-Use `status -f` (or `status --follow`) to print the initial snapshot and poll
-Redis once per second. Only changed snapshots are printed, separated by a blank
-line. It prints the final `done: true` snapshot and exits automatically, including
-when the job was already complete. Without a running node, following a waiting
-job keeps waiting; Ctrl-C stops the follow command without cancelling the job.
-When the job is complete, the frontier and in-flight counts are zero and
-`done` is true. Failed requests appear in `unsuccessful`; a completed job may
-contain failed requests. Without a running node, a new job stays waiting with
-one frontier URL and zero crawled files. Submitting the URL again returns the
-same ID, including after completion, without starting a new crawl.
-`stats` shows file totals, the number of distinct extensions, each extension's
-count in alphabetical order, and total words. If the job is not done, it prints
-an unfinished message without partial counts. An unknown job is an error.
-Each URL in a multi-URL submission
-gets its own job; all inputs are validated before any of that batch's jobs are
-created. A Redis error during submission can still interrupt the batch.
-
-The assignment's example can be submitted in the same way:
+If that container already exists but is stopped, start it instead:
 
 ```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://cs.muic.mahidol.ac.th/courses/ooc/api/
+docker start redis
 ```
 
-Stop a node with Ctrl-C after its jobs have finished. This version follows the
-assignment's no-crash assumption: stopping a node during a fetch can leave work
-in flight, and recovery is not implemented.
-
-Use `--redis-url` on both the node and CLI commands to connect to another address:
+Wait until this check returns `PONG`; retry the check if Redis is still starting:
 
 ```sh
-cargo run --manifest-path distributed_crawler/Cargo.toml --bin crawl -- --redis-url redis://127.0.0.1:6379/ status 1
+docker exec redis redis-cli PING
 ```
 
-For an optimized build, add `--release` before `--`. Run the node in one terminal
-and submit in another, both pointing at the same Redis instance:
+Only one Redis instance is needed for the cluster. Crawler nodes run directly
+on their host computers, outside Docker.
+
+## Run several nodes and jobs
+
+The default Redis address is `redis://127.0.0.1:6379/`, database 0. The following
+walkthrough runs two nodes on the Redis-hosting computer.
+
+In terminal 1, start a node and leave it running:
 
 ```sh
-cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- node
-cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- submit https://quotes.toscrape.com/
-cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status 1
-cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- status -f 1
-cargo run --release --manifest-path distributed_crawler/Cargo.toml --bin crawl -- stats 1
+crawl node
 ```
 
-The CLI requires a subcommand. Passing a bare URL after `--` does not submit or
-crawl it. The manifest path is required from the repository root because the
-Cargo project is in `distributed_crawler/`.
+In terminal 2, start another node and leave it running:
 
-For the full test suite, use a dedicated Redis instance with no other crawler
-nodes connected. This Docker example uses port 6380 so it can run alongside the
-normal Redis container on port 6379. It disables persistence and is removed when
-stopped:
+```sh
+crawl node
+```
+
+Repeat this command in additional terminals to run N nodes. Each node defaults
+to 10 workers, with a per-node request limit shared across all its jobs. Two
+nodes can have up to 20 requests in flight in total. For a slower learning run,
+`crawl node --workers 1` uses one worker; accepted worker counts are 1 to 10.
+
+In terminal 3, submit two URLs in one command:
+
+```sh
+crawl submit https://quotes.toscrape.com/ https://quotes.toscrape.com/tag/love/
+```
+
+The command prints one numeric job ID and normalized URL per input, then returns
+without waiting. Each URL is both that job's starting point and its base prefix.
+These jobs overlap in reachable URLs, but their work and statistics are separate:
+a URL may be fetched once by each job. Node terminals log `job <id>: fetching
+<url>`, showing which work each process takes.
+
+Use the returned IDs in the following commands. `1` and `2` are examples; IDs
+may differ and may contain gaps:
+
+```sh
+crawl status 1
+crawl stats 1
+crawl status -f 1
+crawl status -f 2
+crawl stats 1
+crawl stats 2
+```
+
+Before completion, `stats` prints an unfinished message without partial counts.
+`status -f` (also `status --follow`) prints an initial snapshot, polls Redis once
+per second, prints changed snapshots, and exits after printing `done: true`.
+It also exits immediately if the job is already done. Without a node, a new job
+stays waiting; Ctrl-C stops the follow command without cancelling the job.
+
+Submit a URL again to see its existing job ID, including after completion:
+
+```sh
+crawl submit https://quotes.toscrape.com/
+```
+
+Duplicate submission does not recrawl the site. To compare fresh one-node and
+multi-node runs, use separate unused Redis databases for the runs, with the same
+address and database on every command in each run. Public-site responses can
+change; use the controlled distributed test below for exact count comparisons.
+
+The assignment's example uses the same submission command:
+
+```sh
+crawl submit https://cs.muic.mahidol.ac.th/courses/ooc/api/
+```
+
+After all jobs finish, stop each node with Ctrl-C. Completed statistics stay in
+Redis and remain readable with `crawl stats`. Do not stop a node mid-crawl for
+this walkthrough: recovery of its in-flight work is not implemented.
+
+## Redis on another computer
+
+Use `--redis-url` on every node and CLI command to select the shared server.
+For example, if its reachable address were `192.168.1.10`:
+
+```sh
+crawl --redis-url redis://192.168.1.10:6379/ node
+crawl --redis-url redis://192.168.1.10:6379/ submit https://quotes.toscrape.com/
+crawl --redis-url redis://192.168.1.10:6379/ status -f 1
+crawl --redis-url redis://192.168.1.10:6379/ stats 1
+```
+
+Replace that example address and job ID with the actual values. `--redis-url`
+can appear before or after the subcommand; a bare Redis URL is not accepted.
+The `/` at the end selects database 0; `/14`, for example, selects database 14.
+All nodes and CLI commands for a run must use the same server and database.
+
+`127.0.0.1` refers to the computer running the command. A node on another
+computer must use the Redis host's reachable IP. Local addresses such as
+`192.168.x.x` need a shared local network or an appropriate private connection
+between networks. Nodes and the CLI communicate only through Redis; no direct
+node-to-node connection is needed.
+
+## Progress and statistics
+
+| Progress field | Meaning |
+|---|---|
+| `crawled` | Successfully counted files, including non-HTML files |
+| `frontier` | URLs waiting to be claimed |
+| `in-flight` | Claimed URLs whose processing has not finished |
+| `processed` | Finished attempts, including successful files, redirects, and failures |
+| `unsuccessful` | Failed HTTP responses or request/body errors |
+| `done` | Both frontier and in-flight collections are empty after results are saved |
+
+A completed job can contain unsuccessful attempts; broken links add no files or
+words. The four final statistics map to `WebStats` as follows:
+
+| CLI output | Rust field and type |
+|---|---|
+| `files` | `num_files: usize` |
+| `extensions` | `num_exts: usize` |
+| Indented extension counts | `ext_counts: HashMap<String, usize>` |
+| `words` | `total_word_count: u64` |
+
+Extension counts are printed alphabetically. An unknown job reports an error
+and exits unsuccessfully. The CLI requires a subcommand; passing only a website
+URL does not submit it.
+
+## Tests
+
+Run tests from the repository root against a dedicated Redis instance with no
+other crawler nodes connected. This Docker example uses port 6380 so it can run
+alongside the normal Redis container on 6379. Use an available name and port.
+Persistence is disabled, and the test container is removed when stopped:
 
 ```sh
 docker run -d --rm --name crawler-test-redis -p 127.0.0.1:6380:6379 redis:7 redis-server --save "" --appendonly no
-CRAWLER_TEST_REDIS_URL=redis://127.0.0.1:6380/ cargo test --manifest-path distributed_crawler/Cargo.toml
+docker exec crawler-test-redis redis-cli PING
+CRAWLER_TEST_REDIS_URL=redis://127.0.0.1:6380/ cargo test --locked --manifest-path distributed_crawler/Cargo.toml
 docker stop crawler-test-redis
 ```
+
+Wait for `PONG` before the test command. In PowerShell, set the test address with
+`$env:CRAWLER_TEST_REDIS_URL = "redis://127.0.0.1:6380/"`, then run the same
+`cargo test` command without the environment assignment in front.
 
 Formatting and lint checks do not need Redis:
 
 ```sh
 cargo fmt --manifest-path distributed_crawler/Cargo.toml --check
-cargo clippy --manifest-path distributed_crawler/Cargo.toml --all-targets -- -D warnings
+cargo clippy --locked --manifest-path distributed_crawler/Cargo.toml --all-targets -- -D warnings
 ```
 
 Redis tests default to `redis://127.0.0.1:6379/15`; set
-`CRAWLER_TEST_REDIS_URL` to use another test instance or database. Storage tests
+`CRAWLER_TEST_REDIS_URL` to select another instance or database. Storage tests
 use unique key prefixes. CLI tests submit unique test URLs and remove their
 own job data afterward; the shared ID counter may advance. Tests never clear
 the entire database. A failed test may leave its own test data behind.
 
-`tests/distributed.rs` launches real host `crawl node` processes against one
-controlled HTTP site, comparing one node with 1 or 10 workers, two nodes, and
-three nodes. Its expected result is 7 files (`html: 5`, `jpg: 1`, `pdf: 1`) and
-10 words. Held responses force requests to overlap across processes and verify
-that an empty frontier with a page in flight stays unfinished. Several parents
-discover the same child; request logs verify one fetch per URL per job and no
-out-of-scope requests. Another scenario runs two overlapping jobs and checks
-independent totals. These runs also check follow-mode exit, immediate final
-stats, completed-submission reuse, and retained stats after nodes stop.
-The test refuses to start nodes if it sees existing active jobs. It stops and
-reaps its child processes and removes only its own job data between runs; use
-the dedicated test instance to keep unrelated jobs and nodes isolated.
+`tests/distributed.rs` launches real host `crawl node` processes against a
+controlled HTTP site, comparing one node with 1 or 10 workers, two nodes with
+one worker each, and three nodes with one worker each. The expected totals are
+7 files (`html: 5`, `jpg: 1`, `pdf: 1`), 3 extensions, and 10 words. Held responses
+force requests to overlap across processes and verify that an empty frontier
+with a page in flight stays unfinished. Several parents discover the same child;
+request logs verify one fetch per URL per job and no out-of-scope requests.
+Another scenario uses two nodes with two workers each and two overlapping jobs,
+checking independent totals. These runs also check follow-mode exit, immediate
+final stats, completed-submission reuse, and retained stats after nodes stop.
 
-HTTP tests start temporary servers on localhost using available ports and stop
-them when each test finishes. The tests require local networking permission.
+The process test refuses to start nodes if it sees existing active jobs. It
+stops and reaps its child processes and removes only its own job data between
+runs. HTTP fixtures use available localhost ports and stop when each test ends.
+The tests require local networking access.
 
 ## Redis submission and progress
 
-`src/store.rs` connects to Redis asynchronously. Production keys use the
-`crawler:` prefix:
+`distributed_crawler/src/store.rs` connects to Redis asynchronously. Production
+keys use the `crawler:` prefix:
 
 | Key | Redis type | Purpose |
 |---|---|---|
@@ -161,26 +262,26 @@ them when each test finishes. The tests require local networking permission.
 | `crawler:job:<id>:inflight` | Set | Claimed URLs whose work is not finished |
 | `crawler:job:<id>:extensions` | Hash | Extension counts for successful files |
 
-Submission reserves a candidate ID, then runs `src/lua/submit.lua`. The script
-returns the existing ID for a duplicate URL, including a completed job. For a
+Submission reserves a candidate ID, then runs
+`distributed_crawler/src/lua/submit.lua`. The script returns the existing ID for a duplicate URL, including a completed job. For a
 new URL, it initializes metadata, records the seed in `seen`, appends it to the
 frontier, adds the job to `active`, and records the submission mapping. Redis
 runs these script commands without another client's commands interleaving,
 so simultaneous submissions cannot create two jobs for the same base.
 Candidate IDs reserved for duplicate submissions are unused; gaps are harmless.
 
-`src/lua/claim.lua` takes one URL from the front of the frontier with `LPOP`,
-records it in the in-flight set with `SADD`, and changes the job state to
+`distributed_crawler/src/lua/claim.lua` takes one URL from the front of the
+frontier with `LPOP`, records it in the in-flight set with `SADD`, and changes the job state to
 `running`. These updates execute together so two callers cannot claim the same
 queue entry, and a status reader cannot see a URL removed from the queue before
 it is recorded in flight. Submission and finish append through `RPUSH`, providing
 shared FIFO scheduling. Unknown jobs, completed jobs, and empty queues return no work.
 An empty queue never marks a job done.
 
-`src/lua/status.lua` reads metadata and queue sizes in one consistent snapshot.
+`distributed_crawler/src/lua/status.lua` reads metadata and queue sizes in one consistent snapshot.
 Unknown jobs return an error through the CLI.
 
-`src/lua/finish.lua` first checks that the parent URL is still in flight. If it
+`distributed_crawler/src/lua/finish.lua` first checks that the parent URL is still in flight. If it
 is not, the result is ignored, preventing duplicate finishes from counting or
 publishing links twice. Each discovered URL is inserted into `seen`; only a new
 insertion is appended to the frontier. This deduplicates discoveries across
@@ -198,12 +299,18 @@ but keeps its metadata, submission mapping, seen URLs, and statistics with no
 expiration. Final counts are stored before the job becomes done; `num_exts`
 is the number of extension hash fields.
 
-`src/lua/stats.lua` checks completion and reads file, word, and extension counts
+`distributed_crawler/src/lua/stats.lua` checks completion and reads file, word, and extension counts
 in one atomic snapshot. Unknown jobs return no result; unfinished jobs return
 an unfinished flag without exposing partial statistics. `Store::stats` returns
 the final `WebStats` only for a completed job. The CLI sorts extension names
 before printing. Results remain available when nodes stop, while Redis retains
 the job data; reading stats does not restart the crawl or clear its results.
+
+For fixed website responses, changing the number of nodes changes processing
+order, not the final sums: each normalized URL is scheduled and claimed once
+per job, and each accepted result contributes once. Separate jobs have separate
+keys, so their queues and counts do not mix. Lua scripts are embedded in the
+binary at compile time; the installed CLI needs no runtime script files.
 
 Coordination assumes the assignment's no-crash model: Redis and nodes stay
 running, and there is no recovery for a worker that disappears while holding
@@ -213,7 +320,7 @@ prepared by this application; repairing corrupted Redis state is not included.
 
 ## Node loop
 
-`src/node.rs` starts a fixed number of long-lived Tokio tasks, defaulting to 10.
+`distributed_crawler/src/node.rs` starts a fixed number of long-lived Tokio tasks, defaulting to 10.
 Each worker owns a cloned handle to the same multiplexed Redis connection and
 HTTP client pool. Cloning these handles does not create separate queues.
 Because a worker awaits each fetch and finish before claiming another URL,
@@ -298,3 +405,25 @@ Extension classification is separate from HTML detection. Response
 - Other non-2xx statuses, including 404 and 500, contribute no files or words.
   Request and HTML-body read errors are returned to the caller without retries.
   The node logs these failures and calls finish to release and record them.
+
+## Troubleshooting and limits
+
+- `crawl: command not found`: install the binary and check Cargo's bin directory
+  in PATH. Alternatively, use the built executable's path from the repository root.
+- Docker reports that `redis` already exists: use `docker start redis` for the
+  existing stopped container instead of trying to create another with that name.
+- `Could not connect to Redis`: check Docker is running, verify `PING`, and check
+  the IP, published port, database, and network reachability. A timeout occurs
+  before the node starts; another computer's local-network IP is not directly
+  reachable from a separate network.
+- A submitted job stays waiting: start a node with the same Redis URL/database.
+- A completed submission produces no new fetches: reuse of its job ID is expected.
+- A website returns errors such as 403 or 503: inspect the node's HTTP error log
+  and the `unsuccessful` count. These responses do not contribute successful files.
+
+The crawler follows the assignment's no-crash model. It does not recover killed
+nodes, retry URLs, cancel jobs, execute JavaScript, or honor robots.txt. Different
+URLs serving identical content are still different files; deduplication is by
+normalized URL within each job, not by response content. No maximum crawl depth
+or page-count cutoff is imposed. There is no configured HTTP request timeout;
+a response that never finishes can keep a job in flight.
